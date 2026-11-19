@@ -15,7 +15,7 @@ Built with **Next.js 14+ (App Router)**, **Tailwind CSS**, and modern glassmorph
 
 ## 🌐 Live Domain
 
-- Website: [khadijhasw.com](https://khadijhasw.com)
+- Website: [portfolio-khadijha-sw.vercel.app](https://portfolio-khadijha-sw.vercel.app/)
 - GitHub: [github.com/khadijha-sw](https://github.com/khadijha-sw)
 
 © 2026 STAREY WONDER. All rights reserved.

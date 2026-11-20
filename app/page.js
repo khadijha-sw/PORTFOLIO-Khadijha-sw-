@@ -1,17 +1,105 @@
 'use client';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import { createClient } from '@supabase/supabase-js';
+
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 
 export default function AgencyPortfolio() {
+  const supabase = useMemo(() => {
+    if (!supabaseUrl || !supabaseAnonKey) return null;
+    return createClient(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+      },
+    });
+  }, []);
+
   const [selectedService, setSelectedService] = useState('AI Chatbot & DM Triage Integration');
   const [bookingData, setBookingData] = useState({ name: '', email: '', phone: '', date: '', time: '', notes: '' });
   const [loading, setLoading] = useState(false);
-  const [authOpen, setAuthOpen] = useState(false);
-  const [authStatus, setAuthStatus] = useState('Client Login');
-  const [darkMode, setDarkMode] = useState(true);
 
+  // Auth modal & persistent Supabase session state
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authMode, setAuthMode] = useState('signin'); // 'signin' | 'signup'
+  const [emailInput, setEmailInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authMessage, setAuthMessage] = useState('');
+  const [user, setUser] = useState(null);
+
+  // Persistent light/dark theme state synced with localStorage and <html>
+  const [darkMode, setDarkMode] = useState(true);
   const [tilt, setTilt] = useState({ rotateX: 0, rotateY: 0 });
   const charCardRef = useRef(null);
 
+  // Load saved theme on mount
+  useEffect(() => {
+    try {
+      const savedTheme = localStorage.getItem('theme');
+      const isDark = savedTheme ? savedTheme === 'dark' : true;
+      setDarkMode(isDark);
+    } catch (e) {}
+  }, []);
+
+  // Apply theme changes to <html> and localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('theme', darkMode ? 'dark' : 'light');
+      const root = document.documentElement;
+      if (darkMode) {
+        root.classList.add('dark');
+        root.classList.remove('light');
+        root.setAttribute('data-theme', 'dark');
+      } else {
+        root.classList.remove('dark');
+        root.classList.add('light');
+        root.setAttribute('data-theme', 'light');
+      }
+    } catch (e) {}
+  }, [darkMode]);
+
+  // Persistent Supabase auth session listener
+  useEffect(() => {
+    if (!supabase) return;
+
+    let active = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (active) {
+        const currentUser = data?.session?.user || null;
+        setUser(currentUser);
+        if (currentUser?.email) {
+          setBookingData((prev) => ({
+            ...prev,
+            email: prev.email || currentUser.email,
+            name: prev.name || currentUser.user_metadata?.full_name || currentUser.user_metadata?.name || '',
+          }));
+        }
+      }
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!active) return;
+      const currentUser = session?.user || null;
+      setUser(currentUser);
+      if (currentUser?.email) {
+        setBookingData((prev) => ({
+          ...prev,
+          email: prev.email || currentUser.email,
+          name: prev.name || currentUser.user_metadata?.full_name || currentUser.user_metadata?.name || '',
+        }));
+      }
+    });
+
+    return () => {
+      active = false;
+      listener?.subscription?.unsubscribe();
+    };
+  }, [supabase]);
+
+  // Subtle hero tilt
   useEffect(() => {
     const handleMouseMove = (e) => {
       const normX = (e.clientX / window.innerWidth) * 2 - 1;
@@ -31,7 +119,8 @@ export default function AgencyPortfolio() {
     e.preventDefault();
     setLoading(true);
 
-    const waMsg = `✦ *NEW KHADIJHA.SW BOOKING* ✦%0A` +
+    const waMsg =
+      `✦ *NEW KHADIJHA.SW BOOKING* ✦%0A` +
       `*Client:* ${encodeURIComponent(bookingData.name)}%0A` +
       `*Email:* ${encodeURIComponent(bookingData.email)}%0A` +
       `*WhatsApp:* ${encodeURIComponent(bookingData.phone)}%0A` +
@@ -47,16 +136,88 @@ export default function AgencyPortfolio() {
     }, 900);
   };
 
-  const handleOAuth = (provider) => {
-    setAuthStatus(`${provider} Connected`);
-    setAuthOpen(false);
-    alert(`Successfully signed in with ${provider}!`);
+  const handleGoogleLogin = async () => {
+    setAuthMessage('');
+    if (!supabase) {
+      setAuthMessage('Supabase configuration missing. Check environment variables.');
+      return;
+    }
+    setAuthLoading(true);
+    const redirectOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://portfolio-khadijha-sw.vercel.app';
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: `${redirectOrigin}/`,
+        queryParams: {
+          prompt: 'select_account',
+        },
+      },
+    });
+    if (error) {
+      setAuthMessage(error.message);
+      setAuthLoading(false);
+    }
   };
+
+  const handleEmailAuth = async (e) => {
+    e.preventDefault();
+    setAuthMessage('');
+    if (!supabase) {
+      setAuthMessage('Supabase configuration missing. Check environment variables.');
+      return;
+    }
+    setAuthLoading(true);
+
+    try {
+      if (authMode === 'signup') {
+        const redirectOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://portfolio-khadijha-sw.vercel.app';
+        const { data, error } = await supabase.auth.signUp({
+          email: emailInput.trim(),
+          password: passwordInput,
+          options: {
+            emailRedirectTo: `${redirectOrigin}/`,
+          },
+        });
+        if (error) {
+          setAuthMessage(error.message);
+        } else if (data?.session) {
+          setAuthOpen(false);
+          setEmailInput('');
+          setPasswordInput('');
+        } else {
+          setAuthMessage('Account created! Please check your email to confirm if email verification is enabled.');
+        }
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: emailInput.trim(),
+          password: passwordInput,
+        });
+        if (error) {
+          setAuthMessage(error.message);
+        } else {
+          setAuthOpen(false);
+          setEmailInput('');
+          setPasswordInput('');
+        }
+      }
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+    setUser(null);
+    setAuthOpen(false);
+  };
+
+  const authLabel = user?.email ? user.email.split('@')[0] : 'Client Login';
 
   return (
     <main
       style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}
-      className={`min-h-screen transition-colors duration-500 relative overflow-hidden p-4 md:p-10 ${
+      className={`min-h-screen transition-colors duration-300 relative overflow-x-clip p-4 md:p-10 ${
         darkMode ? 'bg-[#070412] text-slate-100' : 'bg-[#f4f2f8] text-slate-900'
       }`}
     >
@@ -84,10 +245,10 @@ export default function AgencyPortfolio() {
       <div className="max-w-6xl mx-auto relative z-10">
         {/* Navbar */}
         <header
-          className={`backdrop-blur-2xl border rounded-full px-6 py-3.5 flex justify-between items-center shadow-2xl mb-12 transition-colors duration-300 ${
+          className={`portfolio-card backdrop-blur-2xl border rounded-full px-6 py-3.5 flex justify-between items-center shadow-2xl mb-12 transition-colors duration-300 ${
             darkMode
               ? 'bg-[#120b29]/80 border-purple-400/25 text-white shadow-purple-950/50'
-              : 'bg-white/90 border-slate-300 text-slate-900 shadow-xl'
+              : 'bg-white border-slate-300 text-slate-900 shadow-xl'
           }`}
         >
           <div className="flex items-center gap-3">
@@ -113,23 +274,31 @@ export default function AgencyPortfolio() {
 
           <div className="flex items-center gap-2.5">
             <button
-              onClick={() => setDarkMode(!darkMode)}
+              type="button"
+              onClick={() => setDarkMode((prev) => !prev)}
+              aria-label="Toggle Light and Dark Mode"
               className={`w-10 h-10 rounded-full border flex items-center justify-center text-base shadow-sm transition ${
-                darkMode ? 'bg-[#1a103c] border-purple-400/30 text-yellow-300 hover:border-cyan-400' : 'bg-slate-100 border-slate-300 text-slate-800'
+                darkMode
+                  ? 'bg-[#1a103c] border-purple-400/30 text-yellow-300 hover:border-cyan-400'
+                  : 'bg-slate-100 border-slate-300 text-slate-800 hover:bg-slate-200'
               }`}
             >
               {darkMode ? '☀️' : '🌙'}
             </button>
 
             <button
-              onClick={() => setAuthOpen(true)}
+              type="button"
+              onClick={() => {
+                setAuthMessage('');
+                setAuthOpen(true);
+              }}
               className={`text-xs font-bold px-4 py-2.5 rounded-full shadow-sm transition border ${
                 darkMode
                   ? 'bg-[#1a103c] border-purple-400/30 text-white hover:border-pink-400'
                   : 'bg-slate-100 border-slate-300 text-slate-800 hover:bg-slate-200'
               }`}
             >
-              {authStatus}
+              {user ? `● ${authLabel}` : 'Client Login'}
             </button>
             <a
               href="#booking"
@@ -149,22 +318,24 @@ export default function AgencyPortfolio() {
               transform: `perspective(900px) rotateX(${tilt.rotateX}deg) rotateY(${tilt.rotateY}deg)`,
               transition: 'transform 0.15s ease-out',
             }}
-            className={`lg:col-span-4 backdrop-blur-2xl border rounded-3xl p-6 shadow-2xl flex flex-col items-center justify-between relative overflow-hidden ${
+            className={`portfolio-card lg:col-span-4 backdrop-blur-2xl border rounded-3xl p-6 shadow-2xl flex flex-col items-center justify-between relative ${
               darkMode
                 ? 'bg-gradient-to-b from-[#170e36]/85 to-[#0d0722]/90 border-purple-400/30 shadow-purple-950/60'
                 : 'bg-white border-slate-300 shadow-xl'
             }`}
           >
-            <div className="absolute top-12 w-56 h-56 rounded-full bg-gradient-to-tr from-pink-500/25 via-purple-500/25 to-cyan-400/25 blur-2xl pointer-events-none"></div>
+            {darkMode && (
+              <div className="absolute top-12 w-56 h-56 rounded-full bg-gradient-to-tr from-pink-500/25 via-purple-500/25 to-cyan-400/25 blur-2xl pointer-events-none"></div>
+            )}
 
             <div className="relative w-full flex-1 flex items-center justify-center pt-2 pb-3 animate-float">
-              <div className="relative w-56 h-72 flex items-center justify-center drop-shadow-[0_20px_28px_rgba(168,85,247,0.4)]">
+              <div className="relative w-56 h-72 flex items-center justify-center drop-shadow-[0_20px_28px_rgba(168,85,247,0.35)]">
                 <img
                   src="/Khadijha chrachter 2D.png"
                   alt="Khadijha.SW Character"
                   onError={(e) => {
-                    e.target.onerror = null;
-                    e.target.src = 'https://api.dicebear.com/9.x/lorelei/svg?seed=KhadijhaSW';
+                    e.currentTarget.onerror = null;
+                    e.currentTarget.src = 'https://api.dicebear.com/9.x/lorelei/svg?seed=KhadijhaSW';
                   }}
                   className="w-full h-full object-contain select-none pointer-events-none"
                 />
@@ -173,11 +344,17 @@ export default function AgencyPortfolio() {
 
             <div className="w-full text-center relative z-10 pt-2">
               <div
-                className={`inline-block px-5 py-2.5 rounded-2xl border backdrop-blur-md mb-3 ${
+                className={`inline-block px-5 py-2.5 rounded-2xl border mb-3 ${
                   darkMode ? 'bg-[#0b061d]/80 border-purple-400/30' : 'bg-slate-100 border-slate-300'
                 }`}
               >
-                <h2 className="brand-font font-extrabold text-sm md:text-base tracking-wide bg-gradient-to-r from-pink-400 via-purple-300 to-cyan-300 bg-clip-text text-transparent">
+                <h2
+                  className={`brand-font font-extrabold text-sm md:text-base tracking-wide ${
+                    darkMode
+                      ? 'bg-gradient-to-r from-pink-400 via-purple-300 to-cyan-300 bg-clip-text text-transparent'
+                      : 'text-purple-800'
+                  }`}
+                >
                   Khadijha.SW
                 </h2>
               </div>
@@ -186,6 +363,7 @@ export default function AgencyPortfolio() {
                 <a
                   href="https://github.com/khadijha-sw"
                   target="_blank"
+                  rel="noreferrer"
                   className={`p-2.5 rounded-xl border transition ${
                     darkMode
                       ? 'bg-[#170e36]/90 border-purple-400/25 text-slate-200 hover:border-cyan-400 hover:text-cyan-300'
@@ -197,6 +375,7 @@ export default function AgencyPortfolio() {
                 <a
                   href="https://www.linkedin.com/in/khadijha-habib-89533743b/"
                   target="_blank"
+                  rel="noreferrer"
                   className={`p-2.5 rounded-xl border transition ${
                     darkMode
                       ? 'bg-[#170e36]/90 border-purple-400/25 text-slate-200 hover:border-cyan-400 hover:text-cyan-300'
@@ -208,6 +387,7 @@ export default function AgencyPortfolio() {
                 <a
                   href="https://www.instagram.com/khadijha_sw/"
                   target="_blank"
+                  rel="noreferrer"
                   className={`p-2.5 rounded-xl border transition ${
                     darkMode
                       ? 'bg-[#170e36]/90 border-purple-400/25 text-slate-200 hover:border-pink-400 hover:text-pink-300'
@@ -219,6 +399,7 @@ export default function AgencyPortfolio() {
                 <a
                   href="https://x.com/Khadijha_sw"
                   target="_blank"
+                  rel="noreferrer"
                   className={`p-2.5 rounded-xl border transition ${
                     darkMode
                       ? 'bg-[#170e36]/90 border-purple-400/25 text-slate-200 hover:border-pink-400 hover:text-pink-300'
@@ -233,31 +414,43 @@ export default function AgencyPortfolio() {
 
           {/* Upgraded Intro Section */}
           <div
-            className={`lg:col-span-8 backdrop-blur-2xl border rounded-3xl p-8 md:p-10 shadow-2xl flex flex-col justify-between transition-colors duration-300 ${
+            className={`portfolio-card lg:col-span-8 backdrop-blur-2xl border rounded-3xl p-8 md:p-10 shadow-2xl flex flex-col justify-between transition-colors duration-300 ${
               darkMode ? 'bg-[#120b29]/80 border-purple-400/25 shadow-purple-950/50 text-slate-100' : 'bg-white border-slate-300 text-slate-900 shadow-xl'
             }`}
           >
             <div>
-              <span className={`inline-flex items-center gap-2 text-[11px] font-extrabold px-3.5 py-1.5 rounded-full uppercase tracking-widest border ${
-                darkMode ? 'bg-purple-500/20 text-cyan-300 border-cyan-400/30' : 'bg-purple-100 text-purple-800 border-purple-300'
-              }`}>
+              <span
+                className={`inline-flex items-center gap-2 text-[11px] font-extrabold px-3.5 py-1.5 rounded-full uppercase tracking-widest border ${
+                  darkMode ? 'bg-purple-500/20 text-cyan-300 border-cyan-400/30' : 'bg-purple-100 text-purple-800 border-purple-300'
+                }`}
+              >
                 ✦ AI AUTOMATION & BEYOND
               </span>
 
               <h1 className="brand-font text-2xl md:text-4xl font-black mt-4 mb-4 tracking-wide leading-tight">
                 LET ME{' '}
-                <span className={darkMode ? 'bg-gradient-to-r from-pink-400 via-purple-300 to-cyan-300 bg-clip-text text-transparent' : 'text-purple-700'}>
+                <span
+                  className={
+                    darkMode
+                      ? 'bg-gradient-to-r from-pink-400 via-purple-300 to-cyan-300 bg-clip-text text-transparent'
+                      : 'text-purple-700'
+                  }
+                >
                   INTRODUCE MYSELF
                 </span>
               </h1>
 
               <p className={`text-sm md:text-[15px] font-medium leading-relaxed mb-4 ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
-                Hi, I am <span className={darkMode ? 'text-pink-400 font-bold' : 'text-pink-600 font-bold'}>Khadijha Habib</span> — an 18-year-old systems architect born on August 25, 2008, based in <span className={darkMode ? 'text-cyan-300 font-bold' : 'text-cyan-700 font-bold'}>Karachi, Pakistan</span>. As the founder of <span className={darkMode ? 'font-bold text-purple-300' : 'font-bold text-purple-800'}>STAREY.WONDER</span>, I build practical AI automations and smart workflows that replace boring manual work with fast, self-running systems.
+                Hi, I am <span className={darkMode ? 'text-pink-400 font-bold' : 'text-pink-600 font-bold'}>Khadijha Habib</span> — an 18-year-old systems architect born on August 25, 2008, based in{' '}
+                <span className={darkMode ? 'text-cyan-300 font-bold' : 'text-cyan-700 font-bold'}>Karachi, Pakistan</span>. As the founder of{' '}
+                <span className={darkMode ? 'font-bold text-purple-300' : 'font-bold text-purple-800'}>STAREY.WONDER</span>, I build practical AI automations and smart workflows that replace boring manual work with fast, self-running systems.
               </p>
 
-              <div className={`space-y-3 text-xs md:text-sm leading-relaxed border-l-2 pl-4 mb-6 ${
-                darkMode ? 'border-purple-500/50 text-slate-300' : 'border-purple-600 text-slate-700'
-              }`}>
+              <div
+                className={`space-y-3 text-xs md:text-sm leading-relaxed border-l-2 pl-4 mb-6 ${
+                  darkMode ? 'border-purple-500/50 text-slate-300' : 'border-purple-600 text-slate-700'
+                }`}
+              >
                 <p>
                   I follow one simple rule in my work: if a task takes 5 hours to do by hand, I build an automation that finishes it in 5 minutes. From e-commerce DM sorting bots to automated Stripe payment flows, my GitHub projects show how clean logic solves real business problems.
                 </p>
@@ -267,7 +460,7 @@ export default function AgencyPortfolio() {
               </div>
 
               {/* Tech Stack Pills */}
-              <div className="mb-2">
+              <div className="mb-6">
                 <p className={`text-[11px] font-bold uppercase tracking-wider mb-2.5 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
                   Tools & Technologies I Build With:
                 </p>
@@ -318,21 +511,31 @@ export default function AgencyPortfolio() {
 
           <div className="space-y-10">
             {/* Project 1 */}
-            <div className={`backdrop-blur-2xl border rounded-3xl p-8 shadow-2xl transition ${
-              darkMode ? 'bg-[#120b29]/85 border-purple-400/30 shadow-purple-950/40' : 'bg-white border-slate-300 shadow-xl'
-            }`}>
+            <div
+              className={`portfolio-card backdrop-blur-2xl border rounded-3xl p-8 shadow-2xl transition ${
+                darkMode ? 'bg-[#120b29]/85 border-purple-400/30 shadow-purple-950/40' : 'bg-white border-slate-300 shadow-xl'
+              }`}
+            >
               <div className="flex justify-between items-start flex-wrap gap-4 mb-4">
                 <div>
                   <span className="text-2xl mr-2">🛍️</span>
                   <span className="brand-font text-xl md:text-2xl font-extrabold">starey-ecom-triage-n8n</span>
                 </div>
-                <span className="bg-emerald-500/20 text-emerald-300 text-xs font-bold px-3.5 py-1.5 rounded-full border border-emerald-400/30">● Production Live</span>
+                <span
+                  className={`text-xs font-bold px-3.5 py-1.5 rounded-full border ${
+                    darkMode
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'
+                      : 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                  }`}
+                >
+                  ● Production Live
+                </span>
               </div>
               <p className={`text-sm mb-6 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
                 Autonomous n8n workflow for instant e-commerce DM triage, AI intent scoring, and priority lead routing.
               </p>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-purple-500/20 text-xs">
+              <div className={`grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t text-xs ${darkMode ? 'border-purple-500/20' : 'border-slate-200'}`}>
                 <div>
                   <h4 className={`font-bold mb-1 uppercase tracking-wider ${darkMode ? 'text-pink-400' : 'text-pink-600'}`}>The Problem & Why I Built It</h4>
                   <p className={darkMode ? 'text-slate-300 leading-relaxed' : 'text-slate-700 leading-relaxed'}>
@@ -353,34 +556,55 @@ export default function AgencyPortfolio() {
                 </div>
               </div>
 
-              <div className="mt-6 flex justify-between items-center flex-wrap gap-4 pt-4 border-t border-purple-500/10">
-                <div className="flex gap-2">
-                  <span className="text-[10px] font-bold bg-pink-500/20 text-pink-300 px-3 py-1 rounded-full border border-pink-400/30">n8n</span>
-                  <span className="text-[10px] font-bold bg-cyan-500/20 text-cyan-300 px-3 py-1 rounded-full border border-cyan-400/30">Webhooks</span>
-                  <span className="text-[10px] font-bold bg-purple-500/20 text-purple-300 px-3 py-1 rounded-full border border-purple-400/30">AI Intent</span>
+              <div className={`mt-6 flex justify-between items-center flex-wrap gap-4 pt-4 border-t ${darkMode ? 'border-purple-500/10' : 'border-slate-200'}`}>
+                <div className="flex flex-wrap gap-2">
+                  <span className={`text-[10px] font-bold px-3 py-1 rounded-full border ${darkMode ? 'bg-pink-500/20 text-pink-300 border-pink-400/30' : 'bg-pink-100 text-pink-800 border-pink-300'}`}>
+                    n8n
+                  </span>
+                  <span className={`text-[10px] font-bold px-3 py-1 rounded-full border ${darkMode ? 'bg-cyan-500/20 text-cyan-300 border-cyan-400/30' : 'bg-cyan-100 text-cyan-800 border-cyan-300'}`}>
+                    Webhooks
+                  </span>
+                  <span className={`text-[10px] font-bold px-3 py-1 rounded-full border ${darkMode ? 'bg-purple-500/20 text-purple-300 border-purple-400/30' : 'bg-purple-100 text-purple-800 border-purple-300'}`}>
+                    AI Intent
+                  </span>
                 </div>
-                <a href="https://github.com/khadijha-sw/starey-ecom-triage-n8n" target="_blank" className="text-xs font-bold text-cyan-300 hover:underline">
+                <a
+                  href="https://github.com/khadijha-sw/starey-ecom-triage-n8n"
+                  target="_blank"
+                  rel="noreferrer"
+                  className={`text-xs font-bold hover:underline ${darkMode ? 'text-cyan-300' : 'text-purple-700'}`}
+                >
                   Inspect Repository on GitHub ↗
                 </a>
               </div>
             </div>
 
             {/* Project 2 */}
-            <div className={`backdrop-blur-2xl border rounded-3xl p-8 shadow-2xl transition ${
-              darkMode ? 'bg-[#120b29]/85 border-purple-400/30 shadow-purple-950/40' : 'bg-white border-slate-300 shadow-xl'
-            }`}>
+            <div
+              className={`portfolio-card backdrop-blur-2xl border rounded-3xl p-8 shadow-2xl transition ${
+                darkMode ? 'bg-[#120b29]/85 border-purple-400/30 shadow-purple-950/40' : 'bg-white border-slate-300 shadow-xl'
+              }`}
+            >
               <div className="flex justify-between items-start flex-wrap gap-4 mb-4">
                 <div>
                   <span className="text-2xl mr-2">💳</span>
                   <span className="brand-font text-xl md:text-2xl font-extrabold">starey-stripe-invoice-flow</span>
                 </div>
-                <span className="bg-emerald-500/20 text-emerald-300 text-xs font-bold px-3.5 py-1.5 rounded-full border border-emerald-400/30">● Production Live</span>
+                <span
+                  className={`text-xs font-bold px-3.5 py-1.5 rounded-full border ${
+                    darkMode
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'
+                      : 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                  }`}
+                >
+                  ● Production Live
+                </span>
               </div>
               <p className={`text-sm mb-6 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
                 Automated Make.com scenario blueprint for real-time Stripe payment reconciliation and instant client onboarding.
               </p>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-purple-500/20 text-xs">
+              <div className={`grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t text-xs ${darkMode ? 'border-purple-500/20' : 'border-slate-200'}`}>
                 <div>
                   <h4 className={`font-bold mb-1 uppercase tracking-wider ${darkMode ? 'text-pink-400' : 'text-pink-600'}`}>The Problem & Why I Built It</h4>
                   <p className={darkMode ? 'text-slate-300 leading-relaxed' : 'text-slate-700 leading-relaxed'}>
@@ -401,34 +625,55 @@ export default function AgencyPortfolio() {
                 </div>
               </div>
 
-              <div className="mt-6 flex justify-between items-center flex-wrap gap-4 pt-4 border-t border-purple-500/10">
-                <div className="flex gap-2">
-                  <span className="text-[10px] font-bold bg-pink-500/20 text-pink-300 px-3 py-1 rounded-full border border-pink-400/30">Make.com</span>
-                  <span className="text-[10px] font-bold bg-cyan-500/20 text-cyan-300 px-3 py-1 rounded-full border border-cyan-400/30">Stripe API</span>
-                  <span className="text-[10px] font-bold bg-purple-500/20 text-purple-300 px-3 py-1 rounded-full border border-purple-400/30">JSON</span>
+              <div className={`mt-6 flex justify-between items-center flex-wrap gap-4 pt-4 border-t ${darkMode ? 'border-purple-500/10' : 'border-slate-200'}`}>
+                <div className="flex flex-wrap gap-2">
+                  <span className={`text-[10px] font-bold px-3 py-1 rounded-full border ${darkMode ? 'bg-pink-500/20 text-pink-300 border-pink-400/30' : 'bg-pink-100 text-pink-800 border-pink-300'}`}>
+                    Make.com
+                  </span>
+                  <span className={`text-[10px] font-bold px-3 py-1 rounded-full border ${darkMode ? 'bg-cyan-500/20 text-cyan-300 border-cyan-400/30' : 'bg-cyan-100 text-cyan-800 border-cyan-300'}`}>
+                    Stripe API
+                  </span>
+                  <span className={`text-[10px] font-bold px-3 py-1 rounded-full border ${darkMode ? 'bg-purple-500/20 text-purple-300 border-purple-400/30' : 'bg-purple-100 text-purple-800 border-purple-300'}`}>
+                    JSON
+                  </span>
                 </div>
-                <a href="https://github.com/khadijha-sw/starey-stripe-invoice-flow" target="_blank" className="text-xs font-bold text-cyan-300 hover:underline">
+                <a
+                  href="https://github.com/khadijha-sw/starey-stripe-invoice-flow"
+                  target="_blank"
+                  rel="noreferrer"
+                  className={`text-xs font-bold hover:underline ${darkMode ? 'text-cyan-300' : 'text-purple-700'}`}
+                >
                   Inspect Repository on GitHub ↗
                 </a>
               </div>
             </div>
 
             {/* Project 3 */}
-            <div className={`backdrop-blur-2xl border rounded-3xl p-8 shadow-2xl transition ${
-              darkMode ? 'bg-[#120b29]/85 border-purple-400/30 shadow-purple-950/40' : 'bg-white border-slate-300 shadow-xl'
-            }`}>
+            <div
+              className={`portfolio-card backdrop-blur-2xl border rounded-3xl p-8 shadow-2xl transition ${
+                darkMode ? 'bg-[#120b29]/85 border-purple-400/30 shadow-purple-950/40' : 'bg-white border-slate-300 shadow-xl'
+              }`}
+            >
               <div className="flex justify-between items-start flex-wrap gap-4 mb-4">
                 <div>
                   <span className="text-2xl mr-2">🌐</span>
                   <span className="brand-font text-xl md:text-2xl font-extrabold">starey-omni-lead-enricher</span>
                 </div>
-                <span className="bg-emerald-500/20 text-emerald-300 text-xs font-bold px-3.5 py-1.5 rounded-full border border-emerald-400/30">● Production Live</span>
+                <span
+                  className={`text-xs font-bold px-3.5 py-1.5 rounded-full border ${
+                    darkMode
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'
+                      : 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                  }`}
+                >
+                  ● Production Live
+                </span>
               </div>
               <p className={`text-sm mb-6 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
                 Enterprise web scraping and multi-source lead prospecting pipeline with strict JSON schema validation.
               </p>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-purple-500/20 text-xs">
+              <div className={`grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t text-xs ${darkMode ? 'border-purple-500/20' : 'border-slate-200'}`}>
                 <div>
                   <h4 className={`font-bold mb-1 uppercase tracking-wider ${darkMode ? 'text-pink-400' : 'text-pink-600'}`}>The Problem & Why I Built It</h4>
                   <p className={darkMode ? 'text-slate-300 leading-relaxed' : 'text-slate-700 leading-relaxed'}>
@@ -449,34 +694,55 @@ export default function AgencyPortfolio() {
                 </div>
               </div>
 
-              <div className="mt-6 flex justify-between items-center flex-wrap gap-4 pt-4 border-t border-purple-500/10">
-                <div className="flex gap-2">
-                  <span className="text-[10px] font-bold bg-pink-500/20 text-pink-300 px-3 py-1 rounded-full border border-pink-400/30">Python</span>
-                  <span className="text-[10px] font-bold bg-cyan-500/20 text-cyan-300 px-3 py-1 rounded-full border border-cyan-400/30">JSON Schema</span>
-                  <span className="text-[10px] font-bold bg-purple-500/20 text-purple-300 px-3 py-1 rounded-full border border-purple-400/30">Scraping</span>
+              <div className={`mt-6 flex justify-between items-center flex-wrap gap-4 pt-4 border-t ${darkMode ? 'border-purple-500/10' : 'border-slate-200'}`}>
+                <div className="flex flex-wrap gap-2">
+                  <span className={`text-[10px] font-bold px-3 py-1 rounded-full border ${darkMode ? 'bg-pink-500/20 text-pink-300 border-pink-400/30' : 'bg-pink-100 text-pink-800 border-pink-300'}`}>
+                    Python
+                  </span>
+                  <span className={`text-[10px] font-bold px-3 py-1 rounded-full border ${darkMode ? 'bg-cyan-500/20 text-cyan-300 border-cyan-400/30' : 'bg-cyan-100 text-cyan-800 border-cyan-300'}`}>
+                    JSON Schema
+                  </span>
+                  <span className={`text-[10px] font-bold px-3 py-1 rounded-full border ${darkMode ? 'bg-purple-500/20 text-purple-300 border-purple-400/30' : 'bg-purple-100 text-purple-800 border-purple-300'}`}>
+                    Scraping
+                  </span>
                 </div>
-                <a href="https://github.com/khadijha-sw/starey-omni-lead-enricher" target="_blank" className="text-xs font-bold text-cyan-300 hover:underline">
+                <a
+                  href="https://github.com/khadijha-sw/starey-omni-lead-enricher"
+                  target="_blank"
+                  rel="noreferrer"
+                  className={`text-xs font-bold hover:underline ${darkMode ? 'text-cyan-300' : 'text-purple-700'}`}
+                >
                   Inspect Repository on GitHub ↗
                 </a>
               </div>
             </div>
 
             {/* Project 4 */}
-            <div className={`backdrop-blur-2xl border rounded-3xl p-8 shadow-2xl transition ${
-              darkMode ? 'bg-[#120b29]/85 border-purple-400/30 shadow-purple-950/40' : 'bg-white border-slate-300 shadow-xl'
-            }`}>
+            <div
+              className={`portfolio-card backdrop-blur-2xl border rounded-3xl p-8 shadow-2xl transition ${
+                darkMode ? 'bg-[#120b29]/85 border-purple-400/30 shadow-purple-950/40' : 'bg-white border-slate-300 shadow-xl'
+              }`}
+            >
               <div className="flex justify-between items-start flex-wrap gap-4 mb-4">
                 <div>
                   <span className="text-2xl mr-2">📢</span>
                   <span className="brand-font text-xl md:text-2xl font-extrabold">starey-social-autopilot-make</span>
                 </div>
-                <span className="bg-emerald-500/20 text-emerald-300 text-xs font-bold px-3.5 py-1.5 rounded-full border border-emerald-400/30">● Production Live</span>
+                <span
+                  className={`text-xs font-bold px-3.5 py-1.5 rounded-full border ${
+                    darkMode
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'
+                      : 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                  }`}
+                >
+                  ● Production Live
+                </span>
               </div>
               <p className={`text-sm mb-6 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
                 AI-powered Make.com content repurposing and multi-platform scheduling engine for LinkedIn, X, and Instagram.
               </p>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-purple-500/20 text-xs">
+              <div className={`grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t text-xs ${darkMode ? 'border-purple-500/20' : 'border-slate-200'}`}>
                 <div>
                   <h4 className={`font-bold mb-1 uppercase tracking-wider ${darkMode ? 'text-pink-400' : 'text-pink-600'}`}>The Problem & Why I Built It</h4>
                   <p className={darkMode ? 'text-slate-300 leading-relaxed' : 'text-slate-700 leading-relaxed'}>
@@ -497,13 +763,24 @@ export default function AgencyPortfolio() {
                 </div>
               </div>
 
-              <div className="mt-6 flex justify-between items-center flex-wrap gap-4 pt-4 border-t border-purple-500/10">
-                <div className="flex gap-2">
-                  <span className="text-[10px] font-bold bg-pink-500/20 text-pink-300 px-3 py-1 rounded-full border border-pink-400/30">Make.com</span>
-                  <span className="text-[10px] font-bold bg-cyan-500/20 text-cyan-300 px-3 py-1 rounded-full border border-cyan-400/30">OpenAI</span>
-                  <span className="text-[10px] font-bold bg-purple-500/20 text-purple-300 px-3 py-1 rounded-full border border-purple-400/30">Notion</span>
+              <div className={`mt-6 flex justify-between items-center flex-wrap gap-4 pt-4 border-t ${darkMode ? 'border-purple-500/10' : 'border-slate-200'}`}>
+                <div className="flex flex-wrap gap-2">
+                  <span className={`text-[10px] font-bold px-3 py-1 rounded-full border ${darkMode ? 'bg-pink-500/20 text-pink-300 border-pink-400/30' : 'bg-pink-100 text-pink-800 border-pink-300'}`}>
+                    Make.com
+                  </span>
+                  <span className={`text-[10px] font-bold px-3 py-1 rounded-full border ${darkMode ? 'bg-cyan-500/20 text-cyan-300 border-cyan-400/30' : 'bg-cyan-100 text-cyan-800 border-cyan-300'}`}>
+                    OpenAI
+                  </span>
+                  <span className={`text-[10px] font-bold px-3 py-1 rounded-full border ${darkMode ? 'bg-purple-500/20 text-purple-300 border-purple-400/30' : 'bg-purple-100 text-purple-800 border-purple-300'}`}>
+                    Notion
+                  </span>
                 </div>
-                <a href="https://github.com/khadijha-sw/starey-social-autopilot-make" target="_blank" className="text-xs font-bold text-cyan-300 hover:underline">
+                <a
+                  href="https://github.com/khadijha-sw/starey-social-autopilot-make"
+                  target="_blank"
+                  rel="noreferrer"
+                  className={`text-xs font-bold hover:underline ${darkMode ? 'text-cyan-300' : 'text-purple-700'}`}
+                >
                   Inspect Repository on GitHub ↗
                 </a>
               </div>
@@ -522,13 +799,17 @@ export default function AgencyPortfolio() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div className={`backdrop-blur-2xl border rounded-3xl p-6 shadow-xl flex flex-col justify-between ${
-              darkMode ? 'bg-[#120b29]/80 border-purple-400/25' : 'bg-white border-slate-300'
-            }`}>
+            <div
+              className={`portfolio-card backdrop-blur-2xl border rounded-3xl p-6 shadow-xl flex flex-col justify-between ${
+                darkMode ? 'bg-[#120b29]/80 border-purple-400/25' : 'bg-white border-slate-300'
+              }`}
+            >
               <div>
-                <span className={`text-xs font-extrabold px-3 py-1 rounded-full border ${
-                  darkMode ? 'text-pink-300 bg-pink-500/20 border-pink-400/30' : 'text-pink-700 bg-pink-100 border-pink-300'
-                }`}>
+                <span
+                  className={`text-xs font-extrabold px-3 py-1 rounded-full border ${
+                    darkMode ? 'text-pink-300 bg-pink-500/20 border-pink-400/30' : 'text-pink-700 bg-pink-100 border-pink-300'
+                  }`}
+                >
                   PKR 25,000 / $90
                 </span>
                 <h3 className="brand-font font-extrabold text-lg mt-4 mb-2">AI Chatbot & DM Triage</h3>
@@ -545,13 +826,17 @@ export default function AgencyPortfolio() {
               </a>
             </div>
 
-            <div className={`backdrop-blur-2xl border rounded-3xl p-6 shadow-xl flex flex-col justify-between ${
-              darkMode ? 'bg-[#120b29]/80 border-purple-400/25' : 'bg-white border-slate-300'
-            }`}>
+            <div
+              className={`portfolio-card backdrop-blur-2xl border rounded-3xl p-6 shadow-xl flex flex-col justify-between ${
+                darkMode ? 'bg-[#120b29]/80 border-purple-400/25' : 'bg-white border-slate-300'
+              }`}
+            >
               <div>
-                <span className={`text-xs font-extrabold px-3 py-1 rounded-full border ${
-                  darkMode ? 'text-purple-300 bg-purple-500/20 border-purple-400/30' : 'text-purple-800 bg-purple-100 border-purple-300'
-                }`}>
+                <span
+                  className={`text-xs font-extrabold px-3 py-1 rounded-full border ${
+                    darkMode ? 'text-purple-300 bg-purple-500/20 border-purple-400/30' : 'text-purple-800 bg-purple-100 border-purple-300'
+                  }`}
+                >
                   PKR 35,000 / $125
                 </span>
                 <h3 className="brand-font font-extrabold text-lg mt-4 mb-2">Payment & Onboarding Flow</h3>
@@ -568,13 +853,17 @@ export default function AgencyPortfolio() {
               </a>
             </div>
 
-            <div className={`backdrop-blur-2xl border rounded-3xl p-6 shadow-xl flex flex-col justify-between ${
-              darkMode ? 'bg-[#120b29]/80 border-purple-400/25' : 'bg-white border-slate-300'
-            }`}>
+            <div
+              className={`portfolio-card backdrop-blur-2xl border rounded-3xl p-6 shadow-xl flex flex-col justify-between ${
+                darkMode ? 'bg-[#120b29]/80 border-purple-400/25' : 'bg-white border-slate-300'
+              }`}
+            >
               <div>
-                <span className={`text-xs font-extrabold px-3 py-1 rounded-full border ${
-                  darkMode ? 'text-cyan-300 bg-cyan-500/20 border-cyan-400/30' : 'text-cyan-800 bg-cyan-100 border-cyan-300'
-                }`}>
+                <span
+                  className={`text-xs font-extrabold px-3 py-1 rounded-full border ${
+                    darkMode ? 'text-cyan-300 bg-cyan-500/20 border-cyan-400/30' : 'text-cyan-800 bg-cyan-100 border-cyan-300'
+                  }`}
+                >
                   PKR 45,000 / $160
                 </span>
                 <h3 className="brand-font font-extrabold text-lg mt-4 mb-2">Full AI Pipeline Setup</h3>
@@ -596,7 +885,7 @@ export default function AgencyPortfolio() {
         {/* Booking Section */}
         <section
           id="booking"
-          className={`backdrop-blur-2xl border rounded-3xl p-8 shadow-2xl mb-12 transition-colors duration-300 ${
+          className={`portfolio-card backdrop-blur-2xl border rounded-3xl p-8 shadow-2xl mb-12 transition-colors duration-300 ${
             darkMode ? 'bg-[#120b29]/90 border-purple-400/30' : 'bg-white border-slate-300 shadow-xl'
           }`}
         >
@@ -728,7 +1017,7 @@ export default function AgencyPortfolio() {
         </footer>
       </div>
 
-      {/* OAuth Login Modal */}
+      {/* Supabase Auth Modal (Real Google Account Picker + Email/Password) */}
       {authOpen && (
         <div className="fixed inset-0 bg-slate-950/75 backdrop-blur-md flex items-center justify-center z-50 p-4">
           <div
@@ -737,6 +1026,7 @@ export default function AgencyPortfolio() {
             }`}
           >
             <button
+              type="button"
               onClick={() => setAuthOpen(false)}
               className={`absolute top-4 right-4 w-8 h-8 rounded-full font-bold ${
                 darkMode ? 'bg-[#1a103c] text-pink-400' : 'bg-slate-200 text-pink-700'
@@ -744,24 +1034,104 @@ export default function AgencyPortfolio() {
             >
               ✕
             </button>
-            <span className="text-xs font-extrabold text-cyan-300 uppercase tracking-widest">✦ OAUTH CLIENT PORTAL</span>
-            <h3 className="brand-font text-lg font-extrabold mt-1 mb-4">Sign In Instantly</h3>
-            <div className="space-y-3">
-              <button
-                onClick={() => handleOAuth('Google')}
-                className={`w-full py-3 rounded-xl border text-xs font-bold shadow-sm transition ${
-                  darkMode ? 'bg-[#1a103c] border-purple-400/30 text-white hover:border-cyan-400' : 'bg-slate-100 border-slate-300 text-slate-900 hover:bg-slate-200'
-                }`}
-              >
-                Continue with Google 🚀
-              </button>
-              <button
-                onClick={() => handleOAuth('GitHub')}
-                className="w-full py-3 rounded-xl bg-slate-950 text-white text-xs font-bold shadow-sm hover:bg-slate-900 border border-slate-800 transition"
-              >
-                Continue with GitHub ⌘
-              </button>
-            </div>
+
+            <span className={`text-xs font-extrabold uppercase tracking-widest ${darkMode ? 'text-cyan-300' : 'text-purple-700'}`}>
+              ✦ SUPABASE CLIENT PORTAL
+            </span>
+            <h3 className="brand-font text-lg font-extrabold mt-1 mb-4">
+              {user ? 'Account Connected' : authMode === 'signin' ? 'Sign In Instantly' : 'Create Client Account'}
+            </h3>
+
+            {user ? (
+              <div className="space-y-4">
+                <div className={`p-3.5 rounded-2xl border text-xs text-left ${darkMode ? 'bg-[#1a103c] border-purple-400/25' : 'bg-slate-100 border-slate-200'}`}>
+                  <p className="font-bold">Signed in as:</p>
+                  <p className="mt-1 break-all opacity-90">{user.email}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSignOut}
+                  className="w-full py-3 rounded-xl bg-rose-600 text-white text-xs font-bold shadow-sm hover:bg-rose-700 transition"
+                >
+                  Sign Out
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3 text-left">
+                <button
+                  type="button"
+                  disabled={authLoading}
+                  onClick={handleGoogleLogin}
+                  className={`w-full py-3 rounded-xl border text-xs font-bold shadow-sm transition text-center ${
+                    darkMode
+                      ? 'bg-[#1a103c] border-purple-400/30 text-white hover:border-cyan-400'
+                      : 'bg-slate-100 border-slate-300 text-slate-900 hover:bg-slate-200'
+                  }`}
+                >
+                  {authLoading ? 'Redirecting to Google...' : 'Continue with Google 🚀'}
+                </button>
+
+                <div className="flex items-center gap-2 py-1">
+                  <div className={`h-px flex-1 ${darkMode ? 'bg-purple-400/20' : 'bg-slate-200'}`}></div>
+                  <span className="text-[10px] font-bold uppercase opacity-60">or email</span>
+                  <div className={`h-px flex-1 ${darkMode ? 'bg-purple-400/20' : 'bg-slate-200'}`}></div>
+                </div>
+
+                <form onSubmit={handleEmailAuth} className="space-y-2.5">
+                  <input
+                    type="email"
+                    required
+                    placeholder="you@example.com"
+                    value={emailInput}
+                    onChange={(e) => setEmailInput(e.target.value)}
+                    className={`w-full p-2.5 rounded-xl border text-xs ${
+                      darkMode ? 'bg-[#1a103c] border-purple-400/30 text-white placeholder-slate-500' : 'bg-slate-100 border-slate-300 text-slate-900'
+                    }`}
+                  />
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    placeholder="Password (min 6 chars)"
+                    value={passwordInput}
+                    onChange={(e) => setPasswordInput(e.target.value)}
+                    className={`w-full p-2.5 rounded-xl border text-xs ${
+                      darkMode ? 'bg-[#1a103c] border-purple-400/30 text-white placeholder-slate-500' : 'bg-slate-100 border-slate-300 text-slate-900'
+                    }`}
+                  />
+                  <button
+                    type="submit"
+                    disabled={authLoading}
+                    className="w-full py-3 rounded-xl bg-gradient-to-r from-pink-500 via-purple-500 to-cyan-500 text-white text-xs font-bold shadow-md hover:opacity-95 transition"
+                  >
+                    {authLoading
+                      ? 'Please wait...'
+                      : authMode === 'signin'
+                        ? 'Sign In with Email'
+                        : 'Sign Up with Email'}
+                  </button>
+                </form>
+
+                {authMessage && (
+                  <p className={`text-[11px] font-semibold p-2.5 rounded-xl ${darkMode ? 'bg-purple-950/80 text-cyan-200' : 'bg-slate-100 text-slate-800'}`}>
+                    {authMessage}
+                  </p>
+                )}
+
+                <div className="pt-1 text-center">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMessage('');
+                      setAuthMode((prev) => (prev === 'signin' ? 'signup' : 'signin'));
+                    }}
+                    className={`text-[11px] font-bold underline ${darkMode ? 'text-pink-300' : 'text-purple-700'}`}
+                  >
+                    {authMode === 'signin' ? 'Need an account? Sign Up' : 'Already have an account? Sign In'}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
